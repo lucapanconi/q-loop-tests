@@ -80,17 +80,63 @@ class ColorButton(tk.Frame):
         self.config(bg="black" if selected else self.default_bg)
 
 
-class Labeller:
-    MAX_IMG = 512
+class LabelChart(tk.Canvas):
+    W, H = 180, 110
+    BAR_W = 40
 
+    def __init__(self, parent):
+        super().__init__(
+            parent, width=self.W, height=self.H, bg="#ffffff",
+            highlightthickness=1, highlightbackground="#888",
+        )
+        self._green = 0
+        self._red = 0
+        self._total = 1
+
+    def update_counts(self, labels: np.ndarray):
+        self._green = int((labels == 1).sum())
+        self._red = int(len(labels) - self._green)
+        self._total = max(1, len(labels))
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        W, H = self.W, self.H
+        y0 = H - 22
+        chart_h = y0 - 22
+        cx1 = W // 2 - self.BAR_W - 8
+        cx2 = W // 2 + 8
+        g_h = int((self._green / self._total) * chart_h)
+        r_h = int((self._red / self._total) * chart_h)
+        self.create_rectangle(cx1, y0 - g_h, cx1 + self.BAR_W, y0,
+                              fill="#4caf50", outline="")
+        self.create_rectangle(cx2, y0 - r_h, cx2 + self.BAR_W, y0,
+                              fill="#f44336", outline="")
+        self.create_line(cx1 - 4, y0, cx2 + self.BAR_W + 4, y0, fill="#333")
+        self.create_text(cx1 + self.BAR_W // 2, y0 - g_h - 9,
+                         text=str(self._green), fill="#222",
+                         font=("Helvetica", 10, "bold"))
+        self.create_text(cx2 + self.BAR_W // 2, y0 - r_h - 9,
+                         text=str(self._red), fill="#222",
+                         font=("Helvetica", 10, "bold"))
+        self.create_text(cx1 + self.BAR_W // 2, y0 + 10, text="green",
+                         fill="#333", font=("Helvetica", 9))
+        self.create_text(cx2 + self.BAR_W // 2, y0 + 10, text="red",
+                         fill="#333", font=("Helvetica", 9))
+
+
+class Labeller:
     def __init__(self, root):
         self.root = root
         self.root.title("Image Labeller")
-        self.root.geometry("760x720")
+        self.root.geometry("1280x900")
         self.stack: StackReader | None = None
         self.labels: np.ndarray | None = None
         self.frame_idx = 0
         self.path: str | None = None
+        self._src_pil: Image.Image | None = None
+        self._src_idx = -1
+        self._last_render_size = (0, 0)
 
         self.drop_label = tk.Label(
             root,
@@ -123,6 +169,9 @@ class Labeller:
         n = len(self.stack)
         self.labels = self._load_existing_labels(path, n)
         self.frame_idx = 0
+        self._src_pil = None
+        self._src_idx = -1
+        self._last_render_size = (0, 0)
         self.build_viewer()
 
     @staticmethod
@@ -142,27 +191,23 @@ class Labeller:
     def build_viewer(self):
         self.drop_label.destroy()
 
-        container = tk.Frame(self.root)
-        container.pack(padx=10, pady=10)
+        controls = tk.Frame(self.root)
+        controls.pack(side="bottom", fill="x", pady=(0, 12))
 
-        img_row = tk.Frame(container)
-        img_row.pack()
+        title_row = tk.Frame(controls)
+        title_row.pack(pady=(6, 4))
+        tk.Label(title_row, text="Frame ", font=("Helvetica", 12)).pack(side="left")
+        self.frame_entry = tk.Entry(title_row, width=6, font=("Helvetica", 12),
+                                    justify="center")
+        self.frame_entry.pack(side="left")
+        self.frame_entry.bind("<Return>", self._on_frame_entry)
+        self.frame_entry.bind("<FocusOut>", self._on_frame_entry)
+        self.frame_entry.bind("<Escape>", lambda e: (self._sync_frame_entry(),
+                                                     self.root.focus_set()))
+        self.total_label = tk.Label(title_row, text="", font=("Helvetica", 12))
+        self.total_label.pack(side="left")
 
-        self.prev_btn = tk.Button(img_row, text="\u25c0", command=self.prev_frame,
-                                  width=3, height=15)
-        self.prev_btn.pack(side="left", padx=5)
-
-        self.canvas = tk.Label(img_row, bg="black", width=self.MAX_IMG, height=self.MAX_IMG)
-        self.canvas.pack(side="left")
-
-        self.next_btn = tk.Button(img_row, text="\u25b6", command=self.next_frame,
-                                  width=3, height=15)
-        self.next_btn.pack(side="left", padx=5)
-
-        self.title_label = tk.Label(container, text="", font=("Helvetica", 12))
-        self.title_label.pack(pady=6)
-
-        btn_row = tk.Frame(container)
+        btn_row = tk.Frame(controls)
         btn_row.pack(pady=4)
 
         self.green_btn = ColorButton(btn_row, "#4caf50", lambda: self.set_label(1))
@@ -171,24 +216,98 @@ class Labeller:
         self.red_btn = ColorButton(btn_row, "#f44336", lambda: self.set_label(0))
         self.red_btn.pack(side="left", padx=15)
 
-        tk.Button(container, text="Done", command=self.done, width=12).pack(pady=12)
+        tk.Button(controls, text="Done", command=self.done, width=12,
+                  takefocus=0).pack(pady=(10, 0))
 
-        self.root.bind("<Left>", lambda e: self.prev_frame())
-        self.root.bind("<Right>", lambda e: self.next_frame())
-        self.root.bind("<space>", lambda e: self.toggle_label())
+        img_row = tk.Frame(self.root)
+        img_row.pack(side="top", fill="both", expand=True, padx=10, pady=10)
+
+        self.prev_btn = tk.Button(img_row, text="\u25c0", command=self.prev_frame,
+                                  width=3, takefocus=0)
+        self.prev_btn.pack(side="left", fill="y", padx=(0, 5))
+
+        self.canvas = tk.Canvas(img_row, bg="black", highlightthickness=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self._canvas_img_id: int | None = None
+
+        self.next_btn = tk.Button(img_row, text="\u25b6", command=self.next_frame,
+                                  width=3, takefocus=0)
+        self.next_btn.pack(side="left", fill="y", padx=(5, 0))
+
+        self.chart = LabelChart(img_row)
+        self.chart.place(relx=0.0, rely=1.0, x=10, y=-10, anchor="sw")
+        self.chart.update_counts(self.labels)
+
+        self.canvas.bind("<Configure>", lambda e: self._render_image())
+
+        self.root.bind("<Left>", lambda e: self._shortcut(self.prev_frame))
+        self.root.bind("<Right>", lambda e: self._shortcut(self.next_frame))
+        self.root.bind("<Up>", lambda e: self._shortcut(self.toggle_label))
         self.root.focus_set()
 
         self.update_display()
 
+    def _shortcut(self, action):
+        if isinstance(self.root.focus_get(), tk.Entry):
+            return
+        action()
+
+    def _sync_frame_entry(self):
+        if self.stack is None:
+            return
+        self.frame_entry.delete(0, "end")
+        self.frame_entry.insert(0, str(self.frame_idx + 1))
+        self.total_label.config(text=f" / {len(self.stack)}")
+
+    def _on_frame_entry(self, event=None):
+        if self.stack is None:
+            return
+        try:
+            target = int(self.frame_entry.get()) - 1
+        except ValueError:
+            self._sync_frame_entry()
+            self.root.focus_set()
+            return
+        n = len(self.stack)
+        target = max(0, min(n - 1, target))
+        if target != self.frame_idx:
+            self.frame_idx = target
+            self.update_display()
+        else:
+            self._sync_frame_entry()
+        self.root.focus_set()
+
     def update_display(self):
-        frame = self.stack[self.frame_idx]
-        pil = Image.fromarray(normalize(frame), mode="L")
-        del frame
-        pil.thumbnail((self.MAX_IMG, self.MAX_IMG))
-        self.tk_img = ImageTk.PhotoImage(pil)
-        self.canvas.config(image=self.tk_img, width=pil.width, height=pil.height)
-        self.title_label.config(text=f"Frame {self.frame_idx + 1} / {len(self.stack)}")
+        if self._src_idx != self.frame_idx:
+            frame = self.stack[self.frame_idx]
+            self._src_pil = Image.fromarray(normalize(frame), mode="L")
+            self._src_idx = self.frame_idx
+            self._last_render_size = (0, 0)
+            del frame
+        self._sync_frame_entry()
+        self._render_image()
         self.update_highlight()
+
+    def _render_image(self):
+        if self._src_pil is None:
+            return
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w < 2 or h < 2:
+            return
+        sw, sh = self._src_pil.size
+        scale = min(w / sw, h / sh)
+        tw = max(1, int(sw * scale))
+        th = max(1, int(sh * scale))
+        if (tw, th) != self._last_render_size or self._canvas_img_id is None:
+            resample = Image.NEAREST if scale >= 1 else Image.BILINEAR
+            resized = self._src_pil.resize((tw, th), resample)
+            self.tk_img = ImageTk.PhotoImage(resized)
+            self._last_render_size = (tw, th)
+        self.canvas.delete("img")
+        self._canvas_img_id = self.canvas.create_image(
+            w // 2, h // 2, image=self.tk_img, tags="img"
+        )
 
     def update_highlight(self):
         is_green = bool(self.labels[self.frame_idx] == 1)
@@ -196,8 +315,12 @@ class Labeller:
         self.red_btn.set_selected(not is_green)
 
     def set_label(self, value: int):
+        prev = int(self.labels[self.frame_idx])
+        if prev == value:
+            return
         self.labels[self.frame_idx] = value
         self.update_highlight()
+        self.chart.update_counts(self.labels)
 
     def toggle_label(self):
         self.set_label(1 - int(self.labels[self.frame_idx]))
