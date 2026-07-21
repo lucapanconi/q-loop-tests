@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import numpy as np
@@ -14,6 +15,92 @@ except ImportError:
 class StackReader:
     """Lazy frame reader: only one frame is decoded/held in memory at a time."""
 
+    @staticmethod
+    def _coerce_stack(raw):
+        if hasattr(raw, "keys") and hasattr(raw, "__getitem__") and not isinstance(raw, np.ndarray):
+            for key in ("data", "stack", "images", "frames", "array", "arr"):
+                if key in raw:
+                    return StackReader._coerce_stack(raw[key])
+            keys = list(raw.keys())
+            if len(keys) == 1:
+                return StackReader._coerce_stack(raw[keys[0]])
+            raise ValueError(f"Cannot find array in keys: {keys}")
+
+        if hasattr(raw, "data") and not isinstance(raw, np.ndarray):
+            return StackReader._coerce_stack(raw.data)
+
+        if isinstance(raw, np.ndarray) and raw.dtype == object and raw.ndim == 0:
+            return StackReader._coerce_stack(raw.item())
+
+        if isinstance(raw, (list, tuple)):
+            if not raw:
+                raise ValueError("Empty stack")
+            return np.asarray(raw, dtype=object)
+
+        if not isinstance(raw, np.ndarray):
+            raise ValueError(f"Expected array stack, got {type(raw).__name__}")
+
+        while raw.ndim > 3:
+            raw = raw[0]
+        return raw
+
+    @staticmethod
+    def _load_memmap(path: str):
+        meta_path = os.path.splitext(path)[0] + ".meta.json"
+        if not os.path.exists(meta_path):
+            return None
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        shape = tuple(int(v) for v in meta["shape"])
+        dtype = np.dtype(meta["dtype"])
+        arr = np.memmap(path, dtype=dtype, mode="r", shape=shape)
+        if arr.ndim == 2:
+            return arr, "npy", 1, arr.shape, arr.dtype
+        if arr.ndim == 3:
+            return arr, "npy", arr.shape[0], arr.shape[1:], arr.dtype
+        raise ValueError(f"Unsupported memmap shape {shape} in {path}")
+
+    @staticmethod
+    def _load_npy(path: str):
+        memmap_stack = StackReader._load_memmap(path)
+        if memmap_stack is not None:
+            return memmap_stack
+
+        arr = None
+        last_error = None
+
+        for loader in (
+            lambda: np.load(path, mmap_mode="r"),
+            lambda: np.load(path, allow_pickle=True),
+            lambda: np.load(path, allow_pickle=True, encoding="latin1"),
+        ):
+            try:
+                arr = loader()
+                break
+            except Exception as exc:
+                last_error = exc
+
+        if arr is None:
+            import pickle
+            try:
+                with open(path, "rb") as f:
+                    arr = pickle.load(f)
+            except Exception as exc:
+                last_error = exc
+                msg = str(last_error)
+                raise ValueError(f"Could not load {path}: {msg}") from last_error
+
+        arr = StackReader._coerce_stack(arr)
+
+        if arr.dtype == object:
+            sample = np.asarray(arr[0])
+            return arr, "npy_obj", len(arr), sample.shape, sample.dtype
+        if arr.ndim == 2:
+            return arr, "npy", 1, arr.shape, arr.dtype
+        if arr.ndim == 3:
+            return arr, "npy", arr.shape[0], arr.shape[1:], arr.dtype
+        raise ValueError(f"Unsupported array shape {arr.shape} in {path}")
+
     def __init__(self, path: str):
         self.path = path
         ext = os.path.splitext(path)[1].lower()
@@ -26,6 +113,10 @@ class StackReader:
             sample = self._pages[0].asarray()
             self._frame_shape = sample.shape
             self._dtype = sample.dtype
+        elif ext == ".npy":
+            self._data, self._mode, self._n, self._frame_shape, self._dtype = (
+                self._load_npy(path)
+            )
         else:
             import hyperspy.api as hs
             self._mode = "lazy"
@@ -48,6 +139,10 @@ class StackReader:
             raise IndexError(i)
         if self._mode == "tif":
             return self._pages[i].asarray()
+        if self._mode == "npy_obj":
+            return np.asarray(self._data[i])
+        if self._mode == "npy":
+            return np.asarray(self._data[i] if self._data.ndim == 3 else self._data)
         arr = self._data
         s = arr if arr.ndim == 2 else arr[i]
         if hasattr(s, "compute"):
@@ -57,6 +152,8 @@ class StackReader:
     def close(self):
         if self._mode == "tif":
             self._tif.close()
+        elif self._mode == "npy" and isinstance(self._data, np.memmap):
+            self._data._mmap.close()
 
 
 def normalize(frame: np.ndarray) -> np.ndarray:
@@ -140,7 +237,7 @@ class Labeller:
 
         self.drop_label = tk.Label(
             root,
-            text="Drag & drop an image stack here\n(.emd, .tif, .tiff)",
+            text="Drag & drop an image stack here\n(.emd, .tif, .tiff, .npy)",
             bg="#f0f0f0", relief="ridge", fg="#555", font=("Helvetica", 14),
         )
         self.drop_label.pack(padx=20, pady=20, fill="both", expand=True)
