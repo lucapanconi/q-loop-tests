@@ -12,7 +12,8 @@ This app is used to look through an image stack and mark each frame green or red
    ```bash
    git clone https://github.com/lucapanconi/q-loop-tests
    ```
-6. In the terminal, run the following lines. This will create a Python "environment" which stores all of the code required to run the program. Every time you open a new terminal window or re-open VSCodeRun, you will need to run `source .venv/bin/activate` again.
+6. In VSCode, select File > Open and open the `q-loop-tests` folder.
+7. In the terminal, run the following lines. This will create a Python "environment" which stores all of the code required to run the program. Every time you open a new terminal window or re-open VSCodeRun, you will need to run `source .venv/bin/activate` again.
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
